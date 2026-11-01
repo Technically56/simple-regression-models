@@ -4,21 +4,21 @@ from base import get_base_path
 
 PROJECT_ROOT = get_base_path()
 DEFAULT_URL = "https://ember.elastic.co/ember_dataset_2018_2.tar.bz2"
-DEFAULT_SHA256 = "b6052eb8d350a49a8d5a5396fbe7d16cf42848b86ff969b77464434cf2997812"
+DEFAULT_SHA256 = "b6052eb8d350a49a8d5a5396fbe7d16cf42848b86ff969b77464434cf2997812" 
 
-def _sha256(path):
+def _sha256(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for block in iter(lambda: f.read(1 << 20), b""):
             h.update(block)
     return h.hexdigest()
 
-def _progress(blocks, block_size, total):
+def _progress(blocks: int, block_size: int, total: int):
     size = f"{total / 1e9:.2f} GB" if total > 0 else "unknown"   # urlretrieve passes -1 when the server sends no size
     print(f"\r{blocks * block_size / 1e9:.2f} GB / {size}", end="", flush=True)
 
 
-def download_ember(dest=None, url=None, sha256=None, keep_archive=False):
+def download_ember(dest:Path | None = None, url:str | None = None, sha256:str | None = None, keep_archive:bool=False) -> Path:
     """Download, verify and extract EMBER into dest. Returns dest."""
     dest = Path(dest or os.environ.get("EMBER_DEST", "dataset/ember2018"))
     if not dest.is_absolute():
@@ -56,3 +56,7 @@ def download_ember(dest=None, url=None, sha256=None, keep_archive=False):
         if not any(tmp.iterdir()):
             tmp.rmdir()
     return dest
+
+
+if __name__ == "__main__":
+    download_ember()
