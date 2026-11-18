@@ -41,7 +41,10 @@ def load_model(
     before they are passed to model.predict.
     """
     with np.load(path) as f:
-        cfg = TrainerConfig(**json.loads(str(f["config"])))
+        raw_cfg = json.loads(str(f["config"]))
+        # Runs saved before clipping existed were trained without it.
+        raw_cfg.setdefault("clip", None)
+        cfg = TrainerConfig(**raw_cfg)
         model = MODEL_CLASSES[cfg.model](backend, f["w"].shape[0], l2=cfg.l2)
         model.load({"w": f["w"], "b": f["b"]})
         return model, f["mean"], f["inv_std"], cfg

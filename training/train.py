@@ -1,6 +1,8 @@
 import math
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TypedDict
 
 import numpy as np
 
@@ -8,6 +10,16 @@ from base.base_backend import Array, BaseBackend
 from base.base_dataset import BaseDataset
 from base.base_model import BaseModel
 from base.logger import perf
+from base.normalise import normalise
+
+
+class EpochMetrics(TypedDict):
+    epoch: int
+    train_J: float
+    val_J: float
+    best_J: float
+    seconds: float
+    stopping: bool
 
 
 @dataclass
@@ -21,6 +33,23 @@ class TrainerConfig:
     patience: int = 3
     seed: int = 0
     log_every: int = 50
+    clip: float | None = 5.0  # limit standardised features to +/- clip; None = off
+
+    def __post_init__(self):
+        if self.model not in {"linear", "logistic"}:
+            raise ValueError("model must be linear or logistic")
+        if not math.isfinite(self.lr) or self.lr <= 0:
+            raise ValueError("lr must be finite and positive")
+        if not math.isfinite(self.l2) or self.l2 < 0:
+            raise ValueError("l2 must be finite and non-negative")
+        for name in ("epochs", "batch_size", "patience", "log_every"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if not isinstance(self.seed, int) or self.seed < 0:
+            raise ValueError("seed must be a non-negative integer")
+        if self.clip is not None and (not math.isfinite(self.clip) or self.clip <= 0):
+            raise ValueError("clip must be positive and finite, or None")
 
 
 class Trainer:
@@ -32,6 +61,8 @@ class Trainer:
         val_data: BaseDataset,
         cfg: TrainerConfig,
     ):
+        if not len(train_data) or not len(val_data):
+            raise ValueError("Training and validation splits must both have rows")
         self.model = model
         self.backend = backend
         self.train_data = train_data
@@ -41,8 +72,7 @@ class Trainer:
         self.inv_std = backend.to_device(train_data.inv_std)
 
     def _prepare(self, x_in: np.ndarray, y_in: np.ndarray) -> tuple[Array, Array]:
-        x = self.backend.to_device(x_in)
-        x = self.backend.multiply(self.backend.subtract(x, self.mean), self.inv_std)
+        x = normalise(self.backend, x_in, self.mean, self.inv_std, self.cfg.clip)
         return x, self.backend.to_device(y_in)
 
     def _validate(self) -> float:
@@ -54,7 +84,9 @@ class Trainer:
             )
         return total_loss / len(self.val_data)
 
-    def train(self) -> dict[str, list[float]]:
+    def train(
+        self, on_epoch: Callable[[EpochMetrics], None] | None = None
+    ) -> dict[str, list[float]]:
         rng = np.random.default_rng(self.cfg.seed)
 
         history = {"train_J": [], "val_J": []}
@@ -91,6 +123,10 @@ class Trainer:
                 raise RuntimeError(f"cost diverged at epoch {epoch}; lower lr")
 
             val_J = self._validate()
+            if not math.isfinite(val_J):
+                raise RuntimeError(
+                    f"validation cost diverged at epoch {epoch}; lower lr"
+                )
 
             if val_J < best_J:
                 best_J, best_state, bad_epochs = val_J, self.model.state(), 0
@@ -99,14 +135,17 @@ class Trainer:
 
             history["train_J"].append(train_J)
             history["val_J"].append(val_J)
-            perf(
-                "epoch",
-                epoch=epoch,
-                train_J=train_J,
-                val_J=val_J,
-                best_J=best_J,
-                seconds=time.perf_counter() - t0,
-            )
+            record: EpochMetrics = {
+                "epoch": epoch,
+                "train_J": train_J,
+                "val_J": val_J,
+                "best_J": best_J,
+                "seconds": time.perf_counter() - t0,
+                "stopping": bad_epochs >= self.cfg.patience,
+            }
+            perf("epoch", **record)
+            if on_epoch is not None:
+                on_epoch(record.copy())
 
             if bad_epochs >= self.cfg.patience:
                 perf("early_stop", epoch=epoch, best_J=best_J)

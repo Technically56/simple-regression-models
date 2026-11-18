@@ -27,4 +27,4 @@ class LogisticRegressionModel(BaseModel):
         term2 = self.be.multiply(
             self.be.subtract(1.0, y), self.be.log(self.be.subtract(1.0, h_clipped))
         )
-        return self.be.multiply(self.be.mean(self.be.subtract(-term1, term2)), 1.0)
+        return self.be.mean(self.be.subtract(-term1, term2))

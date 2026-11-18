@@ -1,3 +1,4 @@
+import argparse
 import json
 import logging
 import os
@@ -5,7 +6,6 @@ import re
 import shutil
 import time
 from collections.abc import Iterable, Iterator
-from itertools import islice
 from multiprocessing import Pool
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
@@ -24,7 +24,11 @@ VAL_FRACTION = 0.1
 _LABEL_RE = re.compile(r'"label":\s*(-?\d+)')
 
 
-def _labelled_lines(paths: Iterable[Path], limit: int | None = None) -> Iterator[str]:
+def _labelled_lines(
+    paths: Iterable[Path], keep: np.ndarray | None = None
+) -> Iterator[str]:
+    """Yield labelled lines in file order; with keep (sorted indices), only those."""
+
     def lines() -> Iterator[str]:
         for p in paths:
             with open(p, encoding="utf-8") as f:
@@ -35,7 +39,42 @@ def _labelled_lines(paths: Iterable[Path], limit: int | None = None) -> Iterator
                     if m.group(1) != "-1":
                         yield line
 
-    return islice(lines(), limit)
+    if keep is None:
+        return lines()
+
+    def picked() -> Iterator[str]:
+        wanted = iter(keep.tolist())
+        target = next(wanted, None)
+        for i, line in enumerate(lines()):
+            if target is None:
+                return
+            if i == target:
+                yield line
+                target = next(wanted, None)
+
+    return picked()
+
+
+def _sample_rows(
+    n_available: int, limit: int | None, rng: np.random.Generator
+) -> np.ndarray | None:
+    """Sorted random row indices across all files, or None to keep every row.
+
+    The raw files are not shuffled (long runs of one class), so taking the
+    first `limit` lines can give a split with a single class.
+    """
+    if limit is None or limit >= n_available:
+        return None
+    return np.sort(rng.choice(n_available, size=limit, replace=False))
+
+
+def _check_both_classes(**splits: np.ndarray) -> None:
+    for name, y in splits.items():
+        if np.unique(y).size < 2:
+            raise ValueError(
+                f"The {name} split has only one class (y = {y[0]:.0f}); "
+                "use a larger limit."
+            )
 
 
 def _patch_feature_hasher() -> None:
@@ -108,9 +147,6 @@ class EmberDataset(BaseDataset):
         workers: int | None = None,
     ) -> None:
 
-        from ember.features import PEFeatureExtractor
-        from tqdm import tqdm
-
         dataset_path = Path(dataset_path or get_base_path() / "dataset" / "ember2018")
         out_dir = Path(out_dir or cls.processed_dir())
         if cls.is_built(out_dir):
@@ -120,6 +156,13 @@ class EmberDataset(BaseDataset):
             raise FileExistsError(
                 f"{out_dir} exists but has no meta.json. Remove it and build again."
             )
+        if limit is not None and limit < 10:
+            raise ValueError("limit must be at least 10 to create a validation split")
+        if workers is not None and workers <= 0:
+            raise ValueError("workers must be positive")
+
+        from ember.features import PEFeatureExtractor
+        from tqdm import tqdm
 
         train_files = sorted(dataset_path.glob("train_features_*.jsonl"))
         test_file = dataset_path / "test_features.jsonl"
@@ -134,10 +177,19 @@ class EmberDataset(BaseDataset):
         ).dim
 
         log.info("Counting labelled rows...")
-        n_train_all = sum(1 for _ in _labelled_lines(train_files, limit))
-        n_test = sum(1 for _ in _labelled_lines([test_file], limit))
+        n_train_avail = sum(1 for _ in _labelled_lines(train_files))
+        n_test_avail = sum(1 for _ in _labelled_lines([test_file]))
+        sample_rng = np.random.default_rng((seed, 1))
+        train_keep = _sample_rows(n_train_avail, limit, sample_rng)
+        test_keep = _sample_rows(n_test_avail, limit, sample_rng)
+        n_train_all = n_train_avail if train_keep is None else len(train_keep)
+        n_test = n_test_avail if test_keep is None else len(test_keep)
         n_val = int(n_train_all * VAL_FRACTION)
         n_train = n_train_all - n_val
+        if not n_train or not n_val or not n_test:
+            raise ValueError(
+                "EMBER must contain nonempty labelled train, validation and test splits"
+            )
         log.info("train %d, val %d, test %d rows", n_train, n_val, n_test)
 
         tmp = out_dir.with_name(out_dir.name + ".tmp")
@@ -165,7 +217,7 @@ class EmberDataset(BaseDataset):
         processes = workers or max(1, (os.cpu_count() or 2) - 1)
         with Pool(processes=processes, initializer=cls._init_worker) as pool:
             results = pool.imap(
-                cls._vectorize, _labelled_lines(train_files, limit), chunksize=256
+                cls._vectorize, _labelled_lines(train_files, train_keep), chunksize=256
             )
             for k, (label, vec) in enumerate(
                 tqdm(results, total=n_train_all, desc="train")
@@ -177,7 +229,7 @@ class EmberDataset(BaseDataset):
                     x_train[slot - n_val], y_train[slot - n_val] = vec, label
 
             results = pool.imap(
-                cls._vectorize, _labelled_lines([test_file], limit), chunksize=256
+                cls._vectorize, _labelled_lines([test_file], test_keep), chunksize=256
             )
             for k, (label, vec) in enumerate(tqdm(results, total=n_test, desc="test")):
                 x_test[k], y_test[k] = vec, label
@@ -190,6 +242,7 @@ class EmberDataset(BaseDataset):
             x_val,
             x_test,
         )
+        _check_both_classes(train=y_train, val=y_val, test=y_test)
         np.save(tmp / "y_train.npy", y_train)
         np.save(tmp / "y_val.npy", y_val)
         np.save(tmp / "y_test.npy", y_test)
@@ -221,4 +274,27 @@ class EmberDataset(BaseDataset):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    EmberDataset.build()
+    parser = argparse.ArgumentParser(
+        description="Build memory-mapped EMBER splits (skips existing builds)."
+    )
+    parser.add_argument(
+        "--dataset-path", type=Path, help="Folder containing raw EMBER JSONL files"
+    )
+    parser.add_argument("--out-dir", type=Path, help="Separate processed output folder")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help="Maximum labelled rows from each raw train/test source",
+    )
+    parser.add_argument(
+        "--workers", type=int, help="Number of feature extraction processes"
+    )
+    parser.add_argument("--seed", type=int, default=0)
+    args = parser.parse_args()
+    EmberDataset.build(
+        dataset_path=args.dataset_path,
+        out_dir=args.out_dir,
+        limit=args.limit,
+        workers=args.workers,
+        seed=args.seed,
+    )
