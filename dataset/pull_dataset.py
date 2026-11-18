@@ -1,6 +1,8 @@
-import hashlib, os, shutil, tarfile, urllib.request
+import hashlib, logging, os, shutil, tarfile, urllib.request
 from pathlib import Path
 from base import get_base_path
+
+log = logging.getLogger(__name__)
 
 PROJECT_ROOT = get_base_path()
 DEFAULT_URL = "https://ember.elastic.co/ember_dataset_2018_2.tar.bz2"
@@ -34,7 +36,7 @@ def download_ember(dest:Path | None = None, url:str | None = None, sha256:str | 
 
     if not archive.exists() or _sha256(archive) != expected:
         part = archive.with_name(archive.name + ".part")   # unfinished downloads never look complete
-        print("Downloading", url)
+        log.info("Downloading %s", url)
         urllib.request.urlretrieve(url, part, _progress)
         print()
         if _sha256(part) != expected:
@@ -44,7 +46,7 @@ def download_ember(dest:Path | None = None, url:str | None = None, sha256:str | 
 
     staging = tmp / "extract"
     shutil.rmtree(staging, ignore_errors=True)               # clear leftovers from an interrupted run
-    print("Extracting (bz2 is slow, this can take a while)...")
+    log.info("Extracting (bz2 is slow, this can take a while)...")
     with tarfile.open(archive, "r:bz2") as tar:
         tar.extractall(staging, filter="data")
     (top,) = staging.iterdir()                               # the archive's single top folder, e.g. ember2018/

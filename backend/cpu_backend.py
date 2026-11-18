@@ -1,9 +1,11 @@
-from base import Backend, Array
 import numpy as np
-import threadpoolctl
 import psutil
+import threadpoolctl
 
-class CPUBackend(Backend):
+from base import Array, BaseBackend
+
+
+class CPUBackend(BaseBackend):
     def __init__(self):
         self.xp = np
         self.name = "CPU (NumPy)"
@@ -11,7 +13,7 @@ class CPUBackend(Backend):
         self.is_gpu = False
 
     def to_device(self, numpy_array: Array) -> Array:
-        return np.ascontiguousarray(numpy_array, dtype=self.dtype)
+        return np.asarray(numpy_array, dtype=self.dtype, order="C")
 
     def to_host(self, backend_array: Array) -> Array:
         return np.asarray(backend_array, dtype=self.dtype)
@@ -23,10 +25,10 @@ class CPUBackend(Backend):
         pass
 
     def free_memory(self) -> None:
-        pass #No GPU memory to free in CPU backend
+        pass  # No GPU memory to free in CPU backend
 
     def set_cpu_threads(self, num_threads: int):
-        return threadpoolctl.threadpool_limits(limits=num_threads, user_api='blas')
+        return threadpoolctl.threadpool_limits(limits=num_threads, user_api="blas")
 
     def memory_info(self) -> tuple[int, int]:
         return (psutil.virtual_memory().available, psutil.virtual_memory().total)
@@ -34,7 +36,9 @@ class CPUBackend(Backend):
     def zeros(self, shape: tuple[int, ...]) -> Array:
         return np.zeros(shape, dtype=self.dtype)
 
-    def from_rng(self, rng: np.random.Generator, shape: tuple[int, ...], scale: float = 0.01) -> Array:
+    def from_rng(
+        self, rng: np.random.Generator, shape: tuple[int, ...], scale: float = 0.01
+    ) -> Array:
         return (scale * rng.standard_normal(size=shape)).astype(self.dtype)
 
     def matmul(self, a: Array, b: Array) -> Array:
@@ -53,7 +57,7 @@ class CPUBackend(Backend):
         """Compute log(1 + exp(a)) in a numerically stable way."""
         return np.logaddexp(a, 0)
 
-    def sum (self, a: Array, axis: int | None = None) -> Array:
+    def sum(self, a: Array, axis: int | None = None) -> Array:
         return np.sum(a, axis=axis)
 
     def mean(self, a: Array, axis: int | None = None) -> Array:
@@ -65,10 +69,11 @@ class CPUBackend(Backend):
     def transpose(self, a: Array) -> Array:
         return np.transpose(a)
 
-    def axpy_(self, alpha: Array, x: Array, y: Array) -> None :
+    def axpy_(self, alpha: Array, x: Array, y: Array) -> None:
         np.add(y, alpha * x, out=y)
-        
 
     def subtract(self, a: Array, b: Array | float) -> Array:
         return np.subtract(a, b)
-    
+
+    def log(self, a: Array) -> Array:
+        return np.log(a)
